@@ -1,7 +1,7 @@
 defmodule ApiGatehouse.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/sephianl/api_gatehouse"
 
   def project do
@@ -58,12 +58,13 @@ defmodule ApiGatehouse.MixProject do
 
   defp deps do
     [
-      # 3.38.0 fixes CVE-2026-124283.
-      {:ash, "~> 3.38"},
+      # 3.38.0 fixes CVE-2026-124283, 3.38.1 CVE-2026-120299.
+      {:ash, "~> 3.38 and >= 3.38.1"},
       {:plug, "~> 1.17"},
       {:jason, "~> 1.4"},
       {:hammer, "~> 7.5"},
       {:remote_ip, "~> 1.2"},
+      {:telemetry, "~> 1.0"},
       {:bcrypt_elixir, "~> 3.0"},
       # Test router only: the library's plugs need nothing from Phoenix.
       {:phoenix, "~> 1.7", optional: true},

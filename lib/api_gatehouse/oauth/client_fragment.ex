@@ -42,7 +42,7 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
   ## Actions
 
     * `:create` — accepts `name`, `scopes`, `owner_id` and `company_id`;
-      generates `client_id` and a secret, stores the secret's bcrypt hash and
+      generates `client_id` and a secret, stores the secret's SHA-256 hash and
       returns the plaintext secret once, as `:client_secret` metadata. The
       scopes must be a subset of `c:ApiGatehouse.Server.scopes/0`.
     * `:by_client_id` — the client presenting `client_id`, deleted ones
@@ -53,6 +53,12 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
       newest first.
     * `:soft_delete` — stamps `deleted_at` (once) and revokes every live token
       issued to the client.
+    * `:upgrade_secret_hash` — re-encodes a bcrypt secret hash as SHA-256,
+      given the `secret` that verifies against it; the token and revocation
+      endpoints call it on a client's first successful authentication. It
+      refuses any other secret, so it cannot change a client's secret. Leave it
+      to the server actor: a host policy covering it (such as
+      `action_type(:update)`) keeps bcrypt clients on bcrypt.
     * `:read` — the primary read: every row, deleted ones included.
 
   The host's create flow must take `owner_id` and `company_id` from the signed-in
@@ -77,6 +83,7 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
   alias ApiGatehouse.OAuth.Changes.GenerateClientCredentials
   alias ApiGatehouse.OAuth.Changes.RevokeClientTokens
   alias ApiGatehouse.OAuth.Changes.StampOnce
+  alias ApiGatehouse.OAuth.Changes.UpgradeSecretHash
   alias ApiGatehouse.OAuth.Checks.ServerActor
   alias ApiGatehouse.OAuth.Validations.KnownScopes
 
@@ -86,11 +93,12 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
     define :get_by_id, args: [:id], action: :by_id
     define :list_for_company, args: [:company_id], action: :list_for_company
     define :soft_delete, action: :soft_delete
+    define :upgrade_secret_hash, args: [:secret], action: :upgrade_secret_hash
   end
 
   actions do
     create :create do
-      description "Creates a client. Its secret is returned once, as the `:client_secret` metadata, and only its bcrypt hash is stored."
+      description "Creates a client. Its secret is returned once, as the `:client_secret` metadata, and only its SHA-256 hash is stored."
 
       accept [:name, :scopes, :owner_id, :company_id]
 
@@ -147,6 +155,20 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
       change {StampOnce, attribute: :deleted_at}
       change RevokeClientTokens
     end
+
+    update :upgrade_secret_hash do
+      description "Re-encodes the client's bcrypt secret hash as SHA-256, given the secret that verifies against it. Refuses any other secret."
+
+      accept []
+
+      argument :secret, :string do
+        allow_nil? false
+        sensitive? true
+        constraints trim?: false, allow_empty?: false
+      end
+
+      change UpgradeSecretHash
+    end
   end
 
   policies do
@@ -171,7 +193,7 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
     end
 
     attribute :client_secret_hash, :string do
-      description "bcrypt hash of the client secret. The secret itself is never stored."
+      description "SHA-256 hex of the client secret, or a bcrypt hash until its first use. The secret itself is never stored."
       allow_nil? false
       sensitive? true
     end

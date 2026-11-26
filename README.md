@@ -41,8 +41,7 @@ Use api_gatehouse when a customer's system needs OAuth `client_credentials`
 access to your API (customers often insist on OAuth over plain API keys), and
 you want:
 
-- tokens and refresh tokens stored only as hashes, secrets only as bcrypt
-  hashes;
+- tokens, refresh tokens and client secrets stored only as SHA-256 hashes;
 - revocation, client deletion and owner demotion to take effect on the next
   request — every request reloads the token, the client and the owner;
 - tokens that act as a real user of yours, within that user's company, so your
@@ -57,7 +56,7 @@ company id.
 ```elixir
 def deps do
   [
-    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.1.0"},
+    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.2.0"},
     {:simple_sat, "~> 0.1"}
   ]
 end
@@ -65,8 +64,9 @@ end
 
 - The resources' actions are policy-authorized, so Ash needs a SAT solver at
   runtime: `simple_sat` or `picosat_elixir`, without `only:`.
-- Client secrets are hashed with `bcrypt_elixir`, which builds a NIF: the build
-  machine needs `make` and a C compiler.
+- Client secrets stored as bcrypt hashes (by api_gatehouse 0.1.0, or brought
+  over from another server) are checked with `bcrypt_elixir`, which builds a
+  NIF: the build machine needs `make` and a C compiler.
 - Add `:api_gatehouse` to `import_deps` in `.formatter.exs` for the
   `api_gatehouse do server ... end` section to format without parentheses.
 
@@ -159,11 +159,12 @@ timestamps, and these actions (code interface in brackets):
 
 | action | what it does |
 |---|---|
-| `:create` (`create/2`) | Accepts `name`, `scopes` (default `["read"]`), `owner_id`, `company_id`. Generates `client_id` and a secret; stores only the secret's bcrypt hash; returns the secret **once**, as `client.__metadata__.client_secret`. Scopes must be a subset of the server's `scopes/0`. |
+| `:create` (`create/2`) | Accepts `name`, `scopes` (default `["read"]`), `owner_id`, `company_id`. Generates `client_id` and a secret; stores only the secret's SHA-256 hash; returns the secret **once**, as `client.__metadata__.client_secret`. Scopes must be a subset of the server's `scopes/0`. |
 | `:list_for_company` (`list_for_company/2`) | A company's clients, deleted ones excluded, newest first. |
 | `:soft_delete` (`soft_delete/2`) | Stamps `deleted_at` (once) and revokes every live token of the client. |
 | `:by_client_id` (`get_by_client_id/2`) | Live client by its public client id, ignoring the tenant. Used by the library. |
 | `:by_id` (`get_by_id/2`) | Live client by row id, ignoring the tenant. Used by the library. |
+| `:upgrade_secret_hash` (`upgrade_secret_hash/3`) | Re-encodes a bcrypt `client_secret_hash` as SHA-256, given the secret that verifies against it; refuses any other secret. Used by the library on a bcrypt client's first successful authentication; keep host policies off it. |
 | `:read` | Primary read, deleted clients included. |
 
 **Access token** (`ApiGatehouse.OAuth.AccessTokenFragment`) has `token_hash`,
@@ -268,7 +269,7 @@ Optional callbacks:
 | `refresh_idle_ttl/0` | 90 days, in seconds — how long a refresh token may sit unused; every rotation starts a new period |
 | `issue_refresh_token?/0` | `true` — `false` issues no refresh tokens and refuses the refresh grant |
 | `scopes/0` | `["read", "write"]` — every scope a token can carry |
-| `trusted_proxies/0` | `[]` — addresses or CIDR ranges trusted to append to `X-Forwarded-For` |
+| `trusted_proxies/0` | `[]` — addresses or CIDR ranges trusted to append to `X-Forwarded-For`. The header is read only when the socket peer is one of these or a private/loopback address |
 
 ### 4. Router
 
@@ -318,9 +319,12 @@ end
 - **Route plugs need the `[]` third argument** in Phoenix.
 - **Ordering:** the `/api/oauth` scopes come before any `/api` catch-all.
 - **Rate limits:** each `RateLimit` names its own `bucket`, keyed on the client
-  address, which trusts `X-Forwarded-For` only as far as `trusted_proxies/0`
-  allows (see `ApiGatehouse.ClientIp`). Options: `bucket:` (required),
-  `limit:` (required), `period:` in ms (default 60 000).
+  address — an IPv6 caller by its /64 — which trusts `X-Forwarded-For` only
+  when the request arrives from a `trusted_proxies/0` or private/loopback
+  address, and then only as far as those proxies go (see
+  `ApiGatehouse.ClientIp`). List your load balancer in `trusted_proxies/0`:
+  behind an untrusted ingress every caller shares one bucket. Options:
+  `bucket:` (required), `limit:` (required), `period:` in ms (default 60 000).
 - **Other API endpoints** (`forward "/gql", Absinthe.Plug, ...`) go in the same
   `:api` scope. AshJsonApi and AshGraphql read the actor, tenant and context
   `Bearer` sets.
@@ -425,7 +429,7 @@ long as its refresh token could still have been presented.
 # client_secret posted to the token endpoint lands in the router's debug log.
 config :phoenix, :filter_parameters, ["password", "secret", "token"]
 
-# config/test.exs: cheap bcrypt in tests.
+# config/test.exs: cheap bcrypt in tests that import clients with bcrypt hashes.
 config :bcrypt_elixir, log_rounds: 4
 ```
 
@@ -441,6 +445,35 @@ use under concurrency. On your real data layer:
 - `load_owner/2` resolves an owner in, and only in, the client's company, and
   refuses a demoted one;
 - a company admin cannot list or delete another company's clients.
+
+### 10. Security logging
+
+The library logs almost nothing on its own. What happens at the token and
+revocation endpoints is reported as `:telemetry` events instead — tokens
+issued, requests refused, refresh-token replays, revocations and rate-limit
+denials — each with the trusted client address and user agent, so you decide
+what to keep and for how long. Every event is listed in
+`ApiGatehouse.Telemetry`; none carries a secret, a token or the connection.
+
+```elixir
+# In your application's start/2:
+:telemetry.attach_many(
+  "my-app-api-security-log",
+  ApiGatehouse.Telemetry.events(),
+  &MyApp.ApiSecurityLog.handle_event/4,
+  nil
+)
+
+defmodule MyApp.ApiSecurityLog do
+  require Logger
+
+  def handle_event([:api_gatehouse | event], _measurements, metadata, _config) do
+    Logger.info("api_gatehouse #{Enum.join(event, ".")}", Map.to_list(metadata))
+  end
+end
+```
+
+The address is personal data: keep these logs for a fixed, short period.
 
 ## Protocol reference
 
@@ -505,7 +538,8 @@ token with its credentials.
 - **Clients.** `oauth_applications` maps onto the client table, keeping each
   row's `id` (tokens refer to it): `uid` →
   `client_id`, `secret` → `client_secret_hash` unchanged (both are
-  `Bcrypt.hash_pwd_salt/1` hashes, so existing secrets keep working), `scopes`
+  `Bcrypt.hash_pwd_salt/1` hashes, so existing secrets keep working; each is
+  re-encoded as SHA-256 on its first successful authentication), `scopes`
   `"read write"` → `string_to_array(scopes, ' ')`, `owner_id` kept,
   `company_id` from the owner's company, `deleted_at` kept. `redirect_uri` is
   dropped.
@@ -543,19 +577,47 @@ token with its credentials.
 
 ## Security notes
 
-- Access and refresh tokens are 32 random bytes, returned once, stored only as
-  SHA-256 hashes. Client secrets are returned once and stored as bcrypt hashes.
-- An unknown client id costs the same bcrypt work as a wrong secret, so the
-  token endpoint does not reveal which client ids exist.
+- Access tokens, refresh tokens and client secrets are 32 random bytes,
+  returned once, stored only as SHA-256 hashes. With nothing to guess, a slow
+  hash would protect nothing; it would only make each unauthenticated request
+  to the token endpoint cost a bcrypt check, which a flood turns into a whole
+  machine's CPU.
+- bcrypt secret hashes — from api_gatehouse 0.1.0 or another server — still
+  verify, and are re-encoded as SHA-256 on the client's first successful
+  authentication when the secret is at least 32 bytes. A shorter secret may be
+  one a person chose, and stays on bcrypt.
+- An unknown client id costs the same check as a wrong secret, so the token
+  endpoint does not reveal which client ids exist — except that a client
+  still on bcrypt answers slower until it is upgraded.
+- Rate limits key on an address the caller cannot pick: `X-Forwarded-For` is
+  read only from a trusted peer, walked from the right past trusted proxies,
+  and an IPv6 caller counts per /64. Expired keys are swept every minute.
 - Every grant and every API request re-reads the token and the client and calls
   `load_owner/2`: nothing is cached. A deleted client, a revoked token and a
   demoted owner fail on the next request.
 - The refresh grant requires client authentication, and the refresh token must
   belong to the authenticated client (RFC 6749 §6).
 - No token, secret or hash is logged by the library. The only log lines are a
-  warning when a replayed refresh token revokes a family and an error when a
+  warning when a replayed refresh token revokes a family, a warning when a
+  bcrypt secret hash could not be re-encoded, and an error when a
   token row cannot be written, naming the public client id, owner and company.
+  Everything else is a telemetry event (step 10), which carries no secret or
+  token either.
 - The tenant a token reaches is the client's company, fixed at creation.
+
+## Upgrading from 0.1.0
+
+- **Client secrets** are stored as SHA-256 from now on. Existing bcrypt hashes
+  keep working and are re-encoded on each client's next successful
+  authentication through the new `:upgrade_secret_hash` action, which only the
+  server actor may run: keep host policies off it. The hash is 64 characters,
+  where bcrypt's was 60.
+- **`X-Forwarded-For` is read only from a trusted peer**: a private or loopback
+  address, or one in `trusted_proxies/0`. If your ingress reaches the app from
+  anywhere else, list it, or every caller shares one rate-limit bucket.
+- **Rate limits** key an IPv6 caller by its /64, and `ApiGatehouse.ClientIp`
+  has `rate_limit_key/2` for hosts that count other endpoints the same way.
+- **Telemetry events** report the token and revocation endpoints (step 10).
 
 ## Limitations
 

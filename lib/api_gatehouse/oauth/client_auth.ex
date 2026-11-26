@@ -12,10 +12,16 @@ defmodule ApiGatehouse.OAuth.ClientAuth do
   some clients send it.
 
   The client is looked up among the live (not deleted) clients, and its secret
-  checked with bcrypt. An unknown client id runs the same bcrypt work against
-  nothing (`ApiGatehouse.OAuth.ClientSecret.verify/2`), so the answer's timing
+  checked against its SHA-256 hash (`ApiGatehouse.OAuth.ClientSecret`). An
+  unknown client id runs the same check against a dummy, so the answer's timing
   does not reveal which client ids exist. Every failure is the same
   `invalid_client`.
+
+  A client still on a bcrypt hash — created by api_gatehouse 0.1.0, or brought
+  over from another server — is re-encoded as SHA-256 the first time its secret
+  verifies (`:upgrade_secret_hash`), so a flood naming its client id costs
+  bcrypt work only until it is next used. Should that write fail, the client
+  is authenticated all the same and keeps its bcrypt hash.
 
   Authentication says nothing about the client's owner: the token endpoint
   loads that separately.
@@ -25,6 +31,10 @@ defmodule ApiGatehouse.OAuth.ClientAuth do
 
   alias ApiGatehouse.OAuth.ClientSecret
   alias ApiGatehouse.OAuth.Lookup
+  alias ApiGatehouse.OAuth.ServerActor
+  alias Ash.Error.Changes.StaleRecord
+
+  require Logger
 
   @typedoc "How the client authenticated, which decides the `invalid_client` challenge."
   @type method :: :basic | :post | :none
@@ -108,14 +118,42 @@ defmodule ApiGatehouse.OAuth.ClientAuth do
   defp verify(server, method, client_id, secret) do
     case Lookup.fetch_client(server, client_id) do
       {:ok, client} ->
-        if ClientSecret.verify(secret, client.client_secret_hash),
-          do: {:ok, client, method},
-          else: failed(method)
+        if ClientSecret.verify(secret, client.client_secret_hash) do
+          upgrade_secret_hash(server, client, secret)
+          {:ok, client, method}
+        else
+          failed(method)
+        end
 
       :error ->
         false = ClientSecret.verify(secret, nil)
         failed(method)
     end
+  end
+
+  defp upgrade_secret_hash(server, client, secret) do
+    if ClientSecret.upgrade?(secret, client.client_secret_hash) do
+      client
+      |> server.client_resource().upgrade_secret_hash(secret,
+        actor: ServerActor.new(),
+        tenant: client.company_id
+      )
+      |> upgraded(client)
+    end
+  end
+
+  defp upgraded({:ok, _client}, _client_before), do: :ok
+
+  defp upgraded({:error, error}, client) do
+    # Stale: a concurrent request upgraded it first, or the secret changed since it was read.
+    if !Enum.any?(Map.get(error, :errors, []), &match?(%StaleRecord{}, &1)) do
+      Logger.warning(
+        "api_gatehouse: client #{client.client_id} keeps its bcrypt secret hash, as it could not be " <>
+          "re-encoded: #{Exception.message(error)}"
+      )
+    end
+
+    :ok
   end
 
   defp failed(method), do: {:error, :invalid_client, "client authentication failed", method}

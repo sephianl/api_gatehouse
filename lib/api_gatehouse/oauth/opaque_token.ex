@@ -8,7 +8,7 @@ defmodule ApiGatehouse.OAuth.OpaqueToken do
   compared, never read back, so there is nothing to decrypt and a leaked table is
   not a set of usable credentials. The hash is unsalted deliberately: the row has
   to be findable from the presented value alone, and 32 random bytes leave
-  nothing to guess. Client secrets are bcrypt-hashed instead; see
+  nothing to guess. Client secrets are stored the same way; see
   `ApiGatehouse.OAuth.ClientSecret`.
 
   Tokens stay opaque rather than becoming JWTs so revocation is immediate — every
