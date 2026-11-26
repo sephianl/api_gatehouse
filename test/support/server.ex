@@ -1,7 +1,8 @@
 defmodule ApiGatehouse.Test.Server do
   @moduledoc """
   The host's `ApiGatehouse.Server`, implementing the optional `trusted_proxies/0`
-  and leaving the rest to their defaults.
+  and `bearer_cache_ttl/0`, so every API request in the suite runs through the
+  bearer cache, and leaving the rest to their defaults.
   """
   @behaviour ApiGatehouse.Server
 
@@ -18,6 +19,9 @@ defmodule ApiGatehouse.Test.Server do
 
   @impl true
   def trusted_proxies, do: ["35.191.0.0/16"]
+
+  @impl true
+  def bearer_cache_ttl, do: 60
 end
 
 defmodule ApiGatehouse.Test.MinimalServer do
@@ -38,7 +42,7 @@ defmodule ApiGatehouse.Test.ConfiguredServer do
   @moduledoc """
   A host server answering every optional callback with a non-default value:
   ten-minute access tokens, refresh tokens that expire after a minute unused,
-  and read as the only scope.
+  read as the only scope, and two minutes of bearer caching.
   """
   @behaviour ApiGatehouse.Server
 
@@ -60,6 +64,8 @@ defmodule ApiGatehouse.Test.ConfiguredServer do
   def scopes, do: ["read"]
   @impl true
   def trusted_proxies, do: ["130.211.0.0/22"]
+  @impl true
+  def bearer_cache_ttl, do: 120
 end
 
 defmodule ApiGatehouse.Test.NoRefreshServer do
@@ -166,4 +172,49 @@ defmodule ApiGatehouse.Test.RacingServer do
   def access_token_resource, do: ApiGatehouse.Test.RacingTokens
   @impl true
   defdelegate load_owner(owner_id, company_id), to: Server
+end
+
+defmodule ApiGatehouse.Test.DemotableServer do
+  @moduledoc """
+  The test server, except that an owner whose id the calling process listed
+  under `:api_gatehouse_demoted` no longer loads, as after a demotion: the
+  owner check a cached token still has to pass.
+  """
+  @behaviour ApiGatehouse.Server
+
+  alias ApiGatehouse.Test.Server
+
+  @impl true
+  defdelegate client_resource, to: Server
+  @impl true
+  defdelegate access_token_resource, to: Server
+  @impl true
+  defdelegate bearer_cache_ttl, to: Server
+
+  @impl true
+  def load_owner(owner_id, company_id) do
+    if owner_id in Process.get(:api_gatehouse_demoted, []),
+      do: {:error, :demoted},
+      else: Server.load_owner(owner_id, company_id)
+  end
+
+  @doc "Demotes `owner_id` for the rest of the calling process."
+  @spec demote(String.t()) :: term()
+  def demote(owner_id), do: Process.put(:api_gatehouse_demoted, [owner_id | Process.get(:api_gatehouse_demoted, [])])
+end
+
+defmodule ApiGatehouse.Test.OverlongCacheServer do
+  @moduledoc "A host server asking to cache bearer rows for longer than the library allows."
+  @behaviour ApiGatehouse.Server
+
+  alias ApiGatehouse.Test.Server
+
+  @impl true
+  defdelegate client_resource, to: Server
+  @impl true
+  defdelegate access_token_resource, to: Server
+  @impl true
+  defdelegate load_owner(owner_id, company_id), to: Server
+  @impl true
+  def bearer_cache_ttl, do: 3600
 end

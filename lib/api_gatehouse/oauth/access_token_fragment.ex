@@ -37,7 +37,10 @@ defmodule ApiGatehouse.OAuth.AccessTokenFragment do
     * `:purge` — destroys rows revoked, or fully expired, before `before`.
     * `:read` — the primary read: every row.
   """
-  use Spark.Dsl.Fragment, of: Ash.Resource, authorizers: [Ash.Policy.Authorizer]
+  use Spark.Dsl.Fragment,
+    of: Ash.Resource,
+    authorizers: [Ash.Policy.Authorizer],
+    notifiers: [ApiGatehouse.OAuth.Notifiers.EvictCachedToken]
 
   alias ApiGatehouse.OAuth.Actions.Purge
   alias ApiGatehouse.OAuth.Actions.RevokeLive

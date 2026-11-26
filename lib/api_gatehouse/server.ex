@@ -61,9 +61,22 @@ defmodule ApiGatehouse.Server do
   @doc "Proxy addresses or CIDR ranges trusted to append to `X-Forwarded-For`. Defaults to `[]`."
   @callback trusted_proxies() :: [String.t()]
 
+  @doc """
+  Seconds `ApiGatehouse.Plug.Bearer` may keep the token and client rows an
+  access token authenticated with, rather than read them again. Defaults to 0,
+  reading them on every request; at most 300.
+
+  The owner is still loaded on every request. A write to a token or client
+  through the resources' actions evicts it on every connected node at once;
+  one that bypasses them, such as raw SQL, or a node cut off from the cluster,
+  goes unseen for up to this long. See `ApiGatehouse.BearerCache`.
+  """
+  @callback bearer_cache_ttl() :: non_neg_integer()
+
   @optional_callbacks access_token_ttl: 0,
                       refresh_idle_ttl: 0,
                       issue_refresh_token?: 0,
                       scopes: 0,
-                      trusted_proxies: 0
+                      trusted_proxies: 0,
+                      bearer_cache_ttl: 0
 end

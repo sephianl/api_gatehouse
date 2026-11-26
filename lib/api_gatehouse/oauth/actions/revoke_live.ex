@@ -2,7 +2,9 @@ defmodule ApiGatehouse.OAuth.Actions.RevokeLive do
   @moduledoc """
   Revokes every live (not yet revoked) token whose attributes named in `by:`
   equal the action's arguments of the same names, through the `:revoke` action,
-  and answers how many it revoked.
+  and answers how many it revoked. It asks for a notification per row, which a
+  bulk update does not send by default, so `ApiGatehouse.BearerCache` drops
+  each revoked token.
 
   A row someone else revoked between the read and the write counts as revoked
   rather than failing the whole revocation: on Postgres the filtered UPDATE
@@ -31,7 +33,8 @@ defmodule ApiGatehouse.OAuth.Actions.RevokeLive do
       Ash.Context.to_opts(context,
         strategy: [:atomic, :atomic_batches, :stream],
         return_records?: true,
-        return_errors?: true
+        return_errors?: true,
+        notify?: true
       )
     )
     |> revoked()

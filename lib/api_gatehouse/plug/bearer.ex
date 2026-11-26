@@ -11,9 +11,12 @@ defmodule ApiGatehouse.Plug.Bearer do
   A token authenticates while it is neither revoked nor expired, its client is
   not deleted (and still has the owner and company the token was issued for),
   and the owner loads through `c:ApiGatehouse.Server.load_owner/2` as a non-nil
-  actor whose `:company_id`, when it has one, is the token's. Nothing is
-  cached: every request reads the token and client rows and loads the owner, so
-  revocation, deletion and demotion take effect on the next request.
+  actor whose `:company_id`, when it has one, is the token's. The owner is
+  loaded on every request, so demotion takes effect on the next one. So are the
+  token and client rows, unless the server sets
+  `c:ApiGatehouse.Server.bearer_cache_ttl/0`: then `ApiGatehouse.BearerCache`
+  keeps them, and revoking the token or deleting its client evicts them on
+  every node, so those take effect on the next request too.
 
   The request then carries that actor (`Ash.PlugHelpers.set_actor/2`), the
   token's company as tenant (`Ash.PlugHelpers.set_tenant/2`), and an Ash
@@ -36,6 +39,7 @@ defmodule ApiGatehouse.Plug.Bearer do
 
   import Plug.Conn
 
+  alias ApiGatehouse.BearerCache
   alias ApiGatehouse.OAuth.Lookup
   alias ApiGatehouse.Plug.Json
   alias ApiGatehouse.Plug.Options
@@ -69,15 +73,25 @@ defmodule ApiGatehouse.Plug.Bearer do
           {:ok, Plug.Conn.t()} | {:error, :missing | :invalid_token}
   def authenticate(conn, server) do
     with {:ok, presented} <- bearer_token(conn),
-         {:ok, token} <- Lookup.fetch_by_access_token(server, presented),
+         {:ok, token, client} <-
+           BearerCache.fetch(server, presented, Callbacks.bearer_cache_ttl(server), fn ->
+             rows(server, presented)
+           end),
          :ok <- usable(token),
-         {:ok, client} <- Lookup.fetch_client_by_id(server, token.client_id),
-         :ok <- issued_for(token, client),
          {:ok, actor} <- Callbacks.load_owner(server, token.owner_id, token.company_id) do
       {:ok, authenticated(conn, token, client, actor)}
     else
       :missing -> {:error, :missing}
       _rejected -> {:error, :invalid_token}
+    end
+  end
+
+  defp rows(server, presented) do
+    with {:ok, token} <- Lookup.fetch_by_access_token(server, presented),
+         :ok <- usable(token),
+         {:ok, client} <- Lookup.fetch_client_by_id(server, token.client_id),
+         :ok <- issued_for(token, client) do
+      {:ok, token, client}
     end
   end
 

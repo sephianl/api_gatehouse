@@ -9,6 +9,7 @@ defmodule ApiGatehouse.Server.CallbacksTest do
   alias ApiGatehouse.Test.ConfiguredServer
   alias ApiGatehouse.Test.LazyServer
   alias ApiGatehouse.Test.MinimalServer
+  alias ApiGatehouse.Test.OverlongCacheServer
   alias ApiGatehouse.Test.User
 
   test "a server implementing only the required callbacks gets every default" do
@@ -17,6 +18,7 @@ defmodule ApiGatehouse.Server.CallbacksTest do
     assert Callbacks.issue_refresh_token?(MinimalServer) == true
     assert Callbacks.scopes(MinimalServer) == ["read", "write"]
     assert Callbacks.trusted_proxies(MinimalServer) == []
+    assert Callbacks.bearer_cache_ttl(MinimalServer) == 0
   end
 
   test "a server's own answers win" do
@@ -25,6 +27,11 @@ defmodule ApiGatehouse.Server.CallbacksTest do
     assert Callbacks.issue_refresh_token?(ConfiguredServer) == true
     assert Callbacks.scopes(ConfiguredServer) == ["read"]
     assert Callbacks.trusted_proxies(ConfiguredServer) == ["130.211.0.0/22"]
+    assert Callbacks.bearer_cache_ttl(ConfiguredServer) == 120
+  end
+
+  test "a bearer cache TTL over the library's limit is held to it" do
+    assert Callbacks.bearer_cache_ttl(OverlongCacheServer) == 300
   end
 
   test "an optional callback counts even before its module is loaded" do

@@ -270,6 +270,34 @@ Optional callbacks:
 | `issue_refresh_token?/0` | `true` — `false` issues no refresh tokens and refuses the refresh grant |
 | `scopes/0` | `["read", "write"]` — every scope a token can carry |
 | `trusted_proxies/0` | `[]` — addresses or CIDR ranges trusted to append to `X-Forwarded-For`. The header is read only when the socket peer is one of these or a private/loopback address |
+| `bearer_cache_ttl/0` | `0` — seconds the bearer plug may keep a token's token and client rows instead of reading them on every request, at most 300. See [Caching bearer lookups](#caching-bearer-lookups) |
+
+#### Caching bearer lookups
+
+By default every API request reads the token row and the client row, and calls
+`load_owner/2`. With `bearer_cache_ttl/0` set, `ApiGatehouse.BearerCache` keeps
+the two rows instead, so a busy integration costs one read per request (the
+owner) rather than three:
+
+```elixir
+@impl true
+def bearer_cache_ttl, do: 30
+```
+
+- The owner is never cached: `load_owner/2` still runs on every request, so a
+  demoted or removed owner is refused at once.
+- Any write to a token or client through the resources' actions (revoking,
+  rotating, a replayed refresh token revoking its family, deleting a client, a
+  host's own update or destroy) evicts it after the write commits, on every
+  node, and keeps it out of the cache for 300 seconds, so a read replica
+  that has not caught up cannot put it back.
+- Evictions travel over `:pg`, so they reach every node your app has clustered
+  with distributed Erlang (`dns_cluster`, `libcluster`). A node cut off from
+  the cluster, and a write that bypasses the actions (raw SQL, a bulk action
+  run with `notify?: false`), go unseen for at most the TTL.
+- Only tokens that authenticated are kept, never past their own expiry, and
+  keyed by their SHA-256: an unknown token adds nothing, and the raw token is
+  not held.
 
 ### 4. Router
 
@@ -593,8 +621,10 @@ token with its credentials.
   read only from a trusted peer, walked from the right past trusted proxies,
   and an IPv6 caller counts per /64. Expired keys are swept every minute.
 - Every grant and every API request re-reads the token and the client and calls
-  `load_owner/2`: nothing is cached. A deleted client, a revoked token and a
-  demoted owner fail on the next request.
+  `load_owner/2`, unless the host turns on the bearer cache, which keeps only
+  the token and client rows and drops them on every node when either is
+  written. A deleted client, a revoked token and a demoted owner fail on the
+  next request either way.
 - The refresh grant requires client authentication, and the refresh token must
   belong to the authenticated client (RFC 6749 §6).
 - No token, secret or hash is logged by the library. The only log lines are a
@@ -604,6 +634,14 @@ token with its credentials.
   Everything else is a telemetry event (step 10), which carries no secret or
   token either.
 - The tenant a token reaches is the client's company, fixed at creation.
+
+## Upgrading from 0.2.0
+
+- **Bearer cache**: off unless your server implements `bearer_cache_ttl/0`
+  (see [Caching bearer lookups](#caching-bearer-lookups)).
+- **Notifications**: both fragments now carry a notifier, and revoking a
+  client's or a family's tokens sends one notification per revoked row, so a
+  host notifier on the access token resource sees those revocations too.
 
 ## Upgrading from 0.1.0
 
