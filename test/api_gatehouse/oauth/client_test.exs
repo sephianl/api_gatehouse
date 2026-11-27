@@ -183,6 +183,10 @@ defmodule ApiGatehouse.OAuth.ClientTest do
       assert {:ok, _deleted} = Client.soft_delete(client, as(user))
       assert {:error, %Invalid{errors: [%StaleRecord{}]}} = Client.soft_delete(client, as(user))
     end
+
+    test "is the primary update, as when it was the only one" do
+      assert %{name: :soft_delete} = Ash.Resource.Info.primary_action(Client, :update)
+    end
   end
 
   describe "host policies" do

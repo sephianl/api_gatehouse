@@ -56,7 +56,7 @@ company id.
 ```elixir
 def deps do
   [
-    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.2.0"},
+    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.2.1"},
     {:simple_sat, "~> 0.1"}
   ]
 end
@@ -161,7 +161,7 @@ timestamps, and these actions (code interface in brackets):
 |---|---|
 | `:create` (`create/2`) | Accepts `name`, `scopes` (default `["read"]`), `owner_id`, `company_id`. Generates `client_id` and a secret; stores only the secret's SHA-256 hash; returns the secret **once**, as `client.__metadata__.client_secret`. Scopes must be a subset of the server's `scopes/0`. |
 | `:list_for_company` (`list_for_company/2`) | A company's clients, deleted ones excluded, newest first. |
-| `:soft_delete` (`soft_delete/2`) | Stamps `deleted_at` (once) and revokes every live token of the client. |
+| `:soft_delete` (`soft_delete/2`) | Primary update. Stamps `deleted_at` (once) and revokes every live token of the client. |
 | `:by_client_id` (`get_by_client_id/2`) | Live client by its public client id, ignoring the tenant. Used by the library. |
 | `:by_id` (`get_by_id/2`) | Live client by row id, ignoring the tenant. Used by the library. |
 | `:upgrade_secret_hash` (`upgrade_secret_hash/3`) | Re-encodes a bcrypt `client_secret_hash` as SHA-256, given the secret that verifies against it; refuses any other secret. Used by the library on a bcrypt client's first successful authentication; keep host policies off it. |
