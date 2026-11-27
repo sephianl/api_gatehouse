@@ -56,7 +56,7 @@ company id.
 ```elixir
 def deps do
   [
-    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.2.1"},
+    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.3.0"},
     {:simple_sat, "~> 0.1"}
   ]
 end
