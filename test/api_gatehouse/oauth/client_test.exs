@@ -1,7 +1,7 @@
 defmodule ApiGatehouse.OAuth.ClientTest do
   @moduledoc """
   The client fragment's actions on a host resource with attribute multitenancy
-  and host policies: a secret is returned once and stored as a bcrypt hash,
+  and host policies: a secret is returned once and stored as a SHA-256 hash,
   scopes must be the server's, deleted clients drop out of every lookup and lose
   their tokens, and the server actor's lookups work beside the host's policies.
   """
@@ -23,12 +23,13 @@ defmodule ApiGatehouse.OAuth.ClientTest do
 
   defp as(user), do: [actor: user, tenant: user.company_id]
 
-  test "create returns the secret once and stores only its bcrypt hash", %{user: user} do
+  test "create returns the secret once and stores only its SHA-256 hash", %{user: user} do
     %{client: client, secret: secret} = Flow.create_client(user)
 
     assert client.client_id =~ ~r/\A[A-Za-z0-9_-]{22}\z/
     assert secret =~ ~r/\A[A-Za-z0-9_-]{43}\z/
-    assert "$2b$" <> _rest = client.client_secret_hash
+    assert client.client_secret_hash =~ ~r/\A[0-9a-f]{64}\z/
+    assert client.client_secret_hash == ClientSecret.hash(secret)
     assert ClientSecret.verify(secret, client.client_secret_hash)
     refute inspect(client) =~ secret
     refute inspect(client) =~ client.client_secret_hash
@@ -182,6 +183,10 @@ defmodule ApiGatehouse.OAuth.ClientTest do
       assert {:ok, _deleted} = Client.soft_delete(client, as(user))
       assert {:error, %Invalid{errors: [%StaleRecord{}]}} = Client.soft_delete(client, as(user))
     end
+
+    test "is the primary update, as when it was the only one" do
+      assert %{name: :soft_delete} = Ash.Resource.Info.primary_action(Client, :update)
+    end
   end
 
   describe "host policies" do
@@ -229,9 +234,10 @@ defmodule ApiGatehouse.OAuth.ClientTest do
   end
 
   describe "a client brought over from another OAuth server" do
-    test "keeps authenticating with its existing bcrypt secret" do
+    defp zelo_secret, do: 42 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+
+    defp import_with_bcrypt(secret) do
       owner = User.admin()
-      zelo_secret = 42 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
       zelo_uid = 21 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
       {:ok, _imported} =
@@ -239,7 +245,7 @@ defmodule ApiGatehouse.OAuth.ClientTest do
           %{
             name: "Imported from Zelo",
             client_id: zelo_uid,
-            client_secret_hash: Bcrypt.hash_pwd_salt(zelo_secret),
+            client_secret_hash: Bcrypt.hash_pwd_salt(secret),
             scopes: ["read", "write"],
             owner_id: owner.id,
             company_id: owner.company_id
@@ -248,12 +254,92 @@ defmodule ApiGatehouse.OAuth.ClientTest do
           tenant: owner.company_id
         )
 
+      zelo_uid
+    end
+
+    defp stored_hash(client_id) do
+      {:ok, client} = Client.get_by_client_id(client_id, actor: ServerActor.new())
+      client.client_secret_hash
+    end
+
+    test "keeps authenticating with its existing bcrypt secret" do
+      secret = zelo_secret()
+      zelo_uid = import_with_bcrypt(secret)
+
       assert %{"scope" => "read write", "access_token" => access_token} =
-               zelo_uid |> Flow.token_basic(zelo_secret) |> Flow.json()
+               zelo_uid |> Flow.token_basic(secret) |> Flow.json()
 
       assert Flow.authenticates?(access_token)
-      assert Flow.token_post(zelo_uid, zelo_secret).status == 200
+      assert Flow.token_post(zelo_uid, secret).status == 200
       assert Flow.token_basic(zelo_uid, "wrong").status == 401
+    end
+
+    test "moves onto a SHA-256 hash the first time it authenticates, so bcrypt runs for it once" do
+      secret = zelo_secret()
+      zelo_uid = import_with_bcrypt(secret)
+
+      assert Flow.token_basic(zelo_uid, secret).status == 200
+      assert stored_hash(zelo_uid) == ClientSecret.hash(secret)
+
+      assert Flow.token_post(zelo_uid, secret).status == 200
+      assert Flow.token_basic(zelo_uid, "wrong").status == 401
+    end
+
+    test "a failed authentication leaves its bcrypt hash alone" do
+      secret = zelo_secret()
+      zelo_uid = import_with_bcrypt(secret)
+
+      assert Flow.token_basic(zelo_uid, secret <> "x").status == 401
+      assert "$2b$" <> _rest = stored_hash(zelo_uid)
+    end
+
+    test "upgrade_secret_hash refuses a secret that does not verify, so it cannot change the secret" do
+      secret = zelo_secret()
+      zelo_uid = import_with_bcrypt(secret)
+      {:ok, client} = Client.get_by_client_id(zelo_uid, actor: ServerActor.new())
+
+      assert {:error, %Invalid{}} =
+               Client.upgrade_secret_hash(client, zelo_secret(),
+                 actor: ServerActor.new(),
+                 tenant: client.company_id
+               )
+
+      assert stored_hash(zelo_uid) == client.client_secret_hash
+    end
+
+    test "upgrade_secret_hash does not write over a hash that changed after it was read" do
+      secret = zelo_secret()
+      zelo_uid = import_with_bcrypt(secret)
+      {:ok, read_before} = Client.get_by_client_id(zelo_uid, actor: ServerActor.new())
+
+      assert {:ok, _upgraded} =
+               Client.upgrade_secret_hash(read_before, secret,
+                 actor: ServerActor.new(),
+                 tenant: read_before.company_id
+               )
+
+      assert {:error, %Invalid{errors: [%StaleRecord{}]}} =
+               Client.upgrade_secret_hash(read_before, secret,
+                 actor: ServerActor.new(),
+                 tenant: read_before.company_id
+               )
+    end
+
+    test "only the server actor may upgrade a hash" do
+      secret = zelo_secret()
+      zelo_uid = import_with_bcrypt(secret)
+      {:ok, client} = Client.get_by_client_id(zelo_uid, actor: ServerActor.new())
+      admin = %{User.admin() | company_id: client.company_id}
+
+      assert {:error, %Forbidden{}} = Client.upgrade_secret_hash(client, secret, as(admin))
+      assert "$2b$" <> _rest = stored_hash(zelo_uid)
+    end
+
+    test "a short secret, which a person may have chosen, stays on bcrypt" do
+      zelo_uid = import_with_bcrypt("a human chose this")
+
+      assert Flow.token_basic(zelo_uid, "a human chose this").status == 200
+      assert "$2b$" <> _rest = stored_hash(zelo_uid)
     end
   end
 end

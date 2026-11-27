@@ -20,7 +20,8 @@ defmodule ApiGatehouse.Plug.Revocation do
   including for a token that never existed, was already revoked, or belongs to
   another client, which is left alone. The spec requires it, and it keeps the
   endpoint from telling a caller which of its guesses are real tokens. Nothing
-  about the token is logged. The response is marked `no-store`.
+  about the token is logged; whether one was revoked is reported only to the
+  host, as `ApiGatehouse.Telemetry` events. The response is marked `no-store`.
   """
   @behaviour Plug
 
@@ -32,6 +33,7 @@ defmodule ApiGatehouse.Plug.Revocation do
   alias ApiGatehouse.Plug.NoStore
   alias ApiGatehouse.Plug.OAuthError
   alias ApiGatehouse.Plug.Options
+  alias ApiGatehouse.Telemetry
 
   @impl Plug
   @spec init(keyword()) :: map()
@@ -45,26 +47,51 @@ defmodule ApiGatehouse.Plug.Revocation do
     params = ClientAuth.body_params(conn)
 
     with {:ok, client, method} <- ClientAuth.authenticate(conn, server),
-         {:ok, token} <- presented_token(params, method) do
-      revoke(server, client, token, params["token_type_hint"])
+         {:ok, token} <- presented_token(params, client, method) do
+      revoked = revoke(server, client, token, params["token_type_hint"])
+
+      Telemetry.emit(
+        [:revocation, :accepted],
+        %{},
+        %{client_id: client.client_id, revoked: revoked},
+        conn,
+        server
+      )
+
       send_resp(conn, 200, "")
     else
       {:error, code, description, method} ->
-        OAuthError.send_error(conn, code, description, method)
+        refuse(conn, server, code, description, method, nil)
+
+      {:error, code, description, method, client} ->
+        refuse(conn, server, code, description, method, client)
     end
   end
 
-  defp presented_token(%{"token" => token}, _method) when is_binary(token) and token != "", do: {:ok, token}
+  defp presented_token(%{"token" => token}, _client, _method) when is_binary(token) and token != "", do: {:ok, token}
 
-  defp presented_token(_params, method), do: {:error, :invalid_request, "token is required", method}
+  defp presented_token(_params, client, method), do: {:error, :invalid_request, "token is required", method, client}
+
+  defp refuse(conn, server, code, description, method, client) do
+    Telemetry.emit(
+      [:revocation, :refused],
+      %{},
+      %{error: code, description: description, client_id: client && client.client_id},
+      conn,
+      server
+    )
+
+    OAuthError.send_error(conn, code, description, method)
+  end
 
   defp revoke(server, client, token, hint) do
     with {:ok, row} <- find(server, token, hint),
-         true <- row.client_id == client.id and is_nil(row.revoked_at) do
-      server.access_token_resource().revoke(row, actor: ServerActor.new())
+         true <- row.client_id == client.id and is_nil(row.revoked_at),
+         {:ok, _revoked} <- server.access_token_resource().revoke(row, actor: ServerActor.new()) do
+      true
+    else
+      _not_revoked -> false
     end
-
-    :ok
   end
 
   defp find(server, token, "refresh_token") do

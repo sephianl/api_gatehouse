@@ -1,7 +1,7 @@
 defmodule ApiGatehouse.OAuth.Changes.GenerateClientCredentials do
   @moduledoc """
   Assigns a new client the identifier it will present from then on and a fresh
-  secret, stores only the secret's bcrypt hash, and returns the secret as
+  secret, stores only the secret's SHA-256 hash, and returns the secret as
   `:client_secret` action metadata — the one and only time it is readable.
 
   Both are generated here rather than accepted, so nobody chooses a client's

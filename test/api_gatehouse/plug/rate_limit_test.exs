@@ -38,6 +38,27 @@ defmodule ApiGatehouse.Plug.RateLimitTest do
     assert_received {:rate_limit_hit, "api_oauth_token:203.0.113.7", _period, _limit}
   end
 
+  test "a caller connecting directly cannot pick its key with X-Forwarded-For" do
+    :post
+    |> conn("/")
+    |> Map.put(:remote_ip, {198, 51, 100, 4})
+    |> put_req_header("x-forwarded-for", "6.6.6.6")
+    |> limit(bucket: "api_oauth_token", limit: 20)
+
+    assert_received {:rate_limit_hit, "api_oauth_token:198.51.100.4", _period, _limit}
+  end
+
+  test "an IPv6 caller's addresses within one /64 count against one key" do
+    for address <- ["2001:db8:1:2::1", "2001:db8:1:2::2"] do
+      :post
+      |> conn("/")
+      |> put_req_header("x-forwarded-for", "#{address}, 35.191.0.5")
+      |> limit(bucket: "api_oauth_token", limit: 20)
+
+      assert_received {:rate_limit_hit, "api_oauth_token:2001:db8:1:2::/64", _period, _limit}
+    end
+  end
+
   test "a denied request is a halted JSON 429 with a Retry-After in seconds" do
     conn = limit(conn(:post, "/"), bucket: "denied", limit: 1)
 

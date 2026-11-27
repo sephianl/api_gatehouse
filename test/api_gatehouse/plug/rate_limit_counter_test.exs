@@ -49,4 +49,14 @@ defmodule ApiGatehouse.Plug.RateLimitCounterTest do
 
     assert :post |> conn("/") |> RateLimit.call(other) |> Map.get(:status) == nil
   end
+
+  test "the counter sweeps expired keys every minute, so a flood of one-off keys is not held for long" do
+    {_id, counter, _type, _modules} =
+      ApiGatehouse.Supervisor
+      |> Supervisor.which_children()
+      |> List.keyfind(ApiGatehouse.RateLimiter, 0)
+
+    assert %{clean_period: clean_period} = :sys.get_state(counter)
+    assert clean_period <= to_timeout(minute: 1)
+  end
 end
