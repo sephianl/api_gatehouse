@@ -150,6 +150,7 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
 
     update :soft_delete do
       description "Deletes a client: it stops authenticating at once, and every live token issued to it is revoked."
+
       primary? true
 
       accept []
