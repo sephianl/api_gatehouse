@@ -635,7 +635,7 @@ token with its credentials.
   token either.
 - The tenant a token reaches is the client's company, fixed at creation.
 
-## Upgrading from 0.2.0
+## Upgrading from 0.2.x
 
 - **Bearer cache**: off unless your server implements `bearer_cache_ttl/0`
   (see [Caching bearer lookups](#caching-bearer-lookups)).
