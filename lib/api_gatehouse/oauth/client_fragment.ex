@@ -78,6 +78,7 @@ defmodule ApiGatehouse.OAuth.ClientFragment do
   use Spark.Dsl.Fragment,
     of: Ash.Resource,
     authorizers: [Ash.Policy.Authorizer],
+    notifiers: [ApiGatehouse.OAuth.Notifiers.EvictCachedClient],
     extensions: [ApiGatehouse.Resource]
 
   alias ApiGatehouse.OAuth.Changes.GenerateClientCredentials

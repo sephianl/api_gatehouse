@@ -9,6 +9,8 @@ defmodule ApiGatehouse.Server.Callbacks do
   request of a fresh VM.
   """
 
+  alias ApiGatehouse.BearerCache
+
   @default_access_token_ttl 3600
   @default_refresh_idle_ttl 90 * 24 * 3600
   @default_scopes ["read", "write"]
@@ -32,6 +34,11 @@ defmodule ApiGatehouse.Server.Callbacks do
   @doc "The proxies trusted to append to `X-Forwarded-For`."
   @spec trusted_proxies(module()) :: [String.t()]
   def trusted_proxies(server), do: optional(server, :trusted_proxies, [])
+
+  @doc "Seconds the bearer plug may keep a token's rows, held between 0 and `ApiGatehouse.BearerCache.max_ttl_seconds/0`."
+  @spec bearer_cache_ttl(module()) :: non_neg_integer()
+  def bearer_cache_ttl(server),
+    do: server |> optional(:bearer_cache_ttl, 0) |> max(0) |> min(BearerCache.max_ttl_seconds())
 
   @doc """
   Loads a client's owner and checks it belongs to the client's company.

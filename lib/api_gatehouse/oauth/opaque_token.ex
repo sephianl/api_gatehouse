@@ -11,8 +11,9 @@ defmodule ApiGatehouse.OAuth.OpaqueToken do
   nothing to guess. Client secrets are stored the same way; see
   `ApiGatehouse.OAuth.ClientSecret`.
 
-  Tokens stay opaque rather than becoming JWTs so revocation is immediate — every
-  request reads the row rather than waiting for an expiry.
+  Tokens stay opaque rather than becoming JWTs so revocation is immediate: a
+  request reads the row, or a cached copy that revoking it evicts, rather than
+  trusting a signature until it expires.
   """
 
   @bytes 32

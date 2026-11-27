@@ -15,7 +15,9 @@ defmodule ApiGatehouse.Plug.BearerTest do
   alias ApiGatehouse.Plug.Bearer
   alias ApiGatehouse.Test.AccessToken
   alias ApiGatehouse.Test.Client
+  alias ApiGatehouse.Test.DemotableServer
   alias ApiGatehouse.Test.Flow
+  alias ApiGatehouse.Test.MinimalServer
   alias ApiGatehouse.Test.Server
   alias ApiGatehouse.Test.User
   alias Ash.PlugHelpers
@@ -145,6 +147,69 @@ defmodule ApiGatehouse.Plug.BearerTest do
     assert Flow.authenticates?(other.__metadata__.access_token)
     {:ok, _deleted} = Client.soft_delete(client, actor: user, tenant: user.company_id)
     refute Flow.authenticates?(other.__metadata__.access_token)
+  end
+
+  describe "the bearer cache" do
+    defp authenticates_with?(server, access_token) do
+      conn =
+        :get
+        |> conn("/")
+        |> put_req_header("authorization", "Bearer " <> access_token)
+        |> Bearer.call(Bearer.init(server: server))
+
+      not conn.halted
+    end
+
+    defp revoked_unnoticed(row) do
+      {:ok, _revoked, notifications} =
+        AccessToken.revoke(row, actor: ServerActor.new(), return_notifications?: true)
+
+      notifications
+    end
+
+    test "serves a token's rows without reading them, until the write's notification evicts them" do
+      %{client: client} = Flow.create_client(User.admin())
+      row = Flow.issue(client)
+      assert Flow.authenticates?(row.__metadata__.access_token)
+
+      notifications = revoked_unnoticed(row)
+      assert Flow.authenticates?(row.__metadata__.access_token)
+
+      Ash.Notifier.notify(notifications)
+      refute Flow.authenticates?(row.__metadata__.access_token)
+    end
+
+    test "is off for a server without a TTL, which reads the rows on every request" do
+      %{client: client} = Flow.create_client(User.admin())
+      row = Flow.issue(client)
+      assert authenticates_with?(MinimalServer, row.__metadata__.access_token)
+
+      revoked_unnoticed(row)
+
+      refute authenticates_with?(MinimalServer, row.__metadata__.access_token)
+    end
+
+    test "still loads a cached token's owner on every request" do
+      user = User.admin()
+      %{client: client} = Flow.create_client(user)
+      access_token = Flow.issue(client).__metadata__.access_token
+      assert authenticates_with?(DemotableServer, access_token)
+
+      DemotableServer.demote(user.id)
+
+      refute authenticates_with?(DemotableServer, access_token)
+    end
+
+    test "a replayed refresh token evicts its family's cached tokens" do
+      %{client_id: client_id, secret: secret, tokens: first} = Flow.connect(User.admin())
+      second = client_id |> Flow.refresh(secret, first["refresh_token"]) |> Flow.json()
+      assert Flow.authenticates?(second["access_token"])
+
+      first["refresh_token"] |> Flow.row_for_refresh() |> Flow.backdate(:revoked_at, 6)
+      assert Flow.refresh(client_id, secret, first["refresh_token"]).status == 400
+
+      refute Flow.authenticates?(second["access_token"])
+    end
   end
 
   describe "an authenticated request" do
