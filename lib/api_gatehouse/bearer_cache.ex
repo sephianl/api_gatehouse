@@ -9,7 +9,10 @@ defmodule ApiGatehouse.BearerCache do
   Any write to a token or client row through the resources' actions evicts it
   on every node, after the write commits
   (`ApiGatehouse.OAuth.Notifiers.EvictCachedToken` and `EvictCachedClient`,
-  over `:pg`). The eviction also leaves a tombstone for the longest TTL, so a
+  over `:pg`). Revoking every token of a client or family at once evicts the
+  client's tokens in one go instead
+  (`ApiGatehouse.OAuth.Actions.RevokeLive`), so that it never has to load
+  them. The eviction also leaves a tombstone for the longest TTL, so a
   read that started before the write, or one answered by a read replica that
   has not seen it yet, cannot put the row back. Only rows that authenticated
   are kept, keyed by the token's SHA-256: an unknown token adds nothing, and no
@@ -29,8 +32,15 @@ defmodule ApiGatehouse.BearerCache do
   @max_ttl_seconds 300
   @sweep_interval to_timeout(minute: 1)
 
-  @typedoc "A cached token, by its resource and hash, or every cached token of a client, by its resource and row id."
-  @type key :: {:token, Ash.Resource.t(), String.t()} | {:client, Ash.Resource.t(), String.t()}
+  @typedoc """
+  A cached token, by its resource and hash; every cached token of a client, by
+  the client resource and row id; or the same by the token resource and the
+  client's row id.
+  """
+  @type key ::
+          {:token, Ash.Resource.t(), String.t()}
+          | {:client, Ash.Resource.t(), String.t()}
+          | {:client_tokens, Ash.Resource.t(), String.t()}
 
   @doc "The longest a server may keep rows, and so how long an eviction keeps them out."
   @spec max_ttl_seconds() :: pos_integer()
@@ -122,9 +132,11 @@ defmodule ApiGatehouse.BearerCache do
   defp withdraw(true, key), do: :ets.delete(@entries, key)
   defp withdraw(false, _key), do: :ok
 
-  defp tombstoned?({key, client_key, _token, _client, _until}) do
+  defp tombstoned?({{:token, resource, _hash} = key, client_key, token, _client, _until}) do
     now = now()
-    tombstoned?(key, now) or tombstoned?(client_key, now)
+
+    tombstoned?(key, now) or tombstoned?(client_key, now) or
+      tombstoned?({:client_tokens, resource, Map.get(token, :client_id)}, now)
   end
 
   defp tombstoned?(key, now), do: match?([{_key, until}] when until > now, :ets.lookup(@tombstones, key))
@@ -139,6 +151,9 @@ defmodule ApiGatehouse.BearerCache do
   defp drop({:token, _resource, _hash} = key), do: :ets.delete(@entries, key)
 
   defp drop({:client, _resource, _id} = client_key), do: :ets.match_delete(@entries, {:_, client_key, :_, :_, :_})
+
+  defp drop({:client_tokens, resource, client_id}),
+    do: :ets.match_delete(@entries, {{:token, resource, :_}, :_, %{client_id: client_id}, :_, :_})
 
   defp sweep(now) do
     :ets.select_delete(@entries, [{{:_, :_, :_, :_, :"$1"}, [{:"=<", :"$1", now}], [true]}])

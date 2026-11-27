@@ -1,9 +1,10 @@
 defmodule ApiGatehouse.OAuth.Notifiers.EvictCachedToken do
   @moduledoc """
   Evicts a token row from `ApiGatehouse.BearerCache` once a write to it
-  commits: revoking or rotating it, revoking its family or its client's tokens,
-  or a host's own update or destroy. Issuing one evicts nothing, since a new
-  token cannot be cached yet.
+  commits: revoking or rotating it, or a host's own update or destroy. Issuing
+  one evicts nothing, since a new token cannot be cached yet. Revoking a
+  family's or a client's tokens sends no notification per row;
+  `ApiGatehouse.OAuth.Actions.RevokeLive` evicts them itself.
   """
   use Spark.Dsl.Extension
   use Ash.Notifier

@@ -98,6 +98,26 @@ defmodule ApiGatehouse.BearerCacheTest do
     assert :ets.lookup(@entries, token_key(first)) == []
   end
 
+  test "evicting a client's tokens by their own resource drops every one it has cached, and keeps them out" do
+    {token, client} = rows()
+    token = Map.put(token, :client_id, client.id)
+    {other_token, other_client} = rows()
+    other_token = Map.put(other_token, :client_id, other_client.id)
+    [first, second, unrelated] = [access_token(), access_token(), access_token()]
+    fetch(first, {token, client})
+    fetch(second, {token, client})
+    fetch(unrelated, {other_token, other_client})
+
+    BearerCache.evict({:client_tokens, AccessToken, client.id})
+
+    assert :ets.lookup(@entries, token_key(first)) == []
+    assert :ets.lookup(@entries, token_key(second)) == []
+    assert [_kept] = :ets.lookup(@entries, token_key(unrelated))
+
+    fetch(first, {token, client})
+    assert :ets.lookup(@entries, token_key(first)) == []
+  end
+
   test "a row read before an eviction is not kept after it" do
     {token, client} = rows()
     presented = access_token()

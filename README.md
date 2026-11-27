@@ -56,7 +56,7 @@ company id.
 ```elixir
 def deps do
   [
-    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.3.0"},
+    {:api_gatehouse, github: "sephianl/api_gatehouse", tag: "v0.3.1"},
     {:simple_sat, "~> 0.1"}
   ]
 end
@@ -635,13 +635,20 @@ token with its credentials.
   token either.
 - The tenant a token reaches is the client's company, fixed at creation.
 
+## Upgrading from 0.3.0
+
+- **Bulk revocations** (deleting a client, a replayed refresh token revoking its
+  family) revoke the rows in one UPDATE without loading them, and send no
+  notification per row; 0.3.0 loaded every row, so a client with a few hundred
+  thousand live tokens took gigabytes to delete. A host notifier on the access
+  token resource no longer sees those revocations.
+
 ## Upgrading from 0.2.x
 
 - **Bearer cache**: off unless your server implements `bearer_cache_ttl/0`
   (see [Caching bearer lookups](#caching-bearer-lookups)).
-- **Notifications**: both fragments now carry a notifier, and revoking a
-  client's or a family's tokens sends one notification per revoked row, so a
-  host notifier on the access token resource sees those revocations too.
+- **Notifications**: both fragments now carry a notifier. Single writes to a
+  token or client notify; bulk revocations do not (see 0.3.0 above).
 
 ## Upgrading from 0.1.0
 
